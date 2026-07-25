@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GNSS Engine L1-Sinc DGPS (Caja Negra)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+
+    <style>
+        .console { font-family: 'Courier New', Courier, monospace; background-color: #050505; color: #00ff33; white-space: pre-wrap; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .disabled-tab { opacity: 0.5; pointer-events: none; }
+        /* Animación para el Modal */
+        .fade-in { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen font-sans relative">
+
+    <!-- MODAL DE PROGRESO (Caja Negra) -->
+    <div id="progress-modal" class="fixed inset-0 bg-black bg-opacity-85 z-50 hidden flex flex-col items-center justify-center fade-in backdrop-blur-sm">
+        <div class="bg-gray-800 p-8 rounded-lg border border-purple-500 shadow-[0_0_40px_rgba(168,85,247,0.4)] w-11/12 max-w-lg text-center">
+            <h2 class="text-2xl font-bold text-purple-400 mb-2">CALIBRANDO MALLA PENTADIMENSIONAL</h2>
+            <p class="text-gray-400 text-sm mb-6">Ajustando Filtro de Kalman (EKF). Por favor, espere...</p>
+            
+            <div class="w-full bg-gray-900 rounded-full h-8 mb-4 overflow-hidden border border-gray-600 shadow-inner">
+                <div id="progress-bar" class="bg-gradient-to-r from-purple-700 to-purple-400 h-8 rounded-full transition-all duration-300 ease-out flex items-center justify-center" style="width: 0%">
+                    <span id="progress-text" class="text-white font-bold text-sm drop-shadow-md">0%</span>
+                </div>
+            </div>
+            <p id="progress-status" class="text-purple-300 text-xs font-mono animate-pulse">Iniciando simulador Monte Carlo...</p>
+        </div>
+    </div>
+
+    <div id="login-container" class="flex items-center justify-center min-h-screen px-4">
+        <div class="bg-gray-800 p-8 rounded-lg shadow-2xl border border-gray-700 w-full max-w-md">
+            <div class="text-center mb-6">
+                <h2 class="text-2xl font-bold text-green-400">GNSSJP PRO V12</h2>
+                <p class="text-gray-400 text-sm mt-1">Autenticación de Operador Geodésico</p>
+            </div>
+            <form id="login-form" onsubmit="loginUsuario(event)">
+                <div class="mb-4">
+                    <label class="block text-sm mb-1 text-gray-300">Correo Electrónico:</label>
+                    <input type="email" id="login-email" required class="w-full bg-gray-700 p-2.5 rounded border border-gray-600 focus:outline-none focus:border-green-500 text-white">
+                </div>
+                <div class="mb-6">
+                    <label class="block text-sm mb-1 text-gray-300">Contraseña:</label>
+                    <input type="password" id="login-password" required class="w-full bg-gray-700 p-2.5 rounded border border-gray-600 focus:outline-none focus:border-green-500 text-white">
+                </div>
+                <button type="submit" class="w-full bg-green-600 hover:bg-green-500 py-2.5 rounded font-bold transition shadow-lg">Ingresar al Sistema</button>
+            </form>
+            <div id="login-error" class="mt-4 text-red-400 text-sm text-center font-semibold hidden"></div>
+        </div>
+    </div>
+
+    <div id="app-container" class="container mx-auto p-4 max-w-5xl hidden">
+        <header class="border-b border-gray-700 pb-4 mb-6 flex justify-between items-center">
+            <div>
+                <h1 class="text-3xl font-bold text-green-400">GNSSJP PRO - Motor Geodésico Avanzado</h1>
+                <p class="text-gray-400 text-sm">Cálculo Diferencial con Órbitas Precisas SP3 y Mallas IONEX | "Dato mata relato"</p>
+            </div>
+            <div>
+                <button onclick="cerrarSesion()" class="bg-gray-700 hover:bg-red-600 text-white text-xs font-bold py-2 px-4 rounded transition">
+                    Cerrar Sesión
+                </button>
+            </div>
+        </header>
+
+        <nav class="flex space-x-2 bg-gray-800 p-2 rounded mb-6" id="tabs-nav">
+            <button onclick="switchTab(1)" id="btn-tab1" class="px-4 py-2 rounded bg-blue-600 font-bold text-sm sm:text-base">1. Datos y Coordenadas</button>
+            <button onclick="switchTab(2)" id="btn-tab2" class="px-4 py-2 rounded bg-gray-700 disabled-tab text-sm sm:text-base">2. Inyección Orbital</button>
+            <button onclick="switchTab(3)" id="btn-tab3" class="px-4 py-2 rounded bg-gray-700 disabled-tab text-sm sm:text-base">3. Calibración Autónoma</button>
+            <button onclick="switchTab(4)" id="btn-tab4" class="px-4 py-2 rounded bg-gray-700 disabled-tab text-sm sm:text-base">4. Procesar Punto</button>
+        </nav>
+
+        <section id="tab1" class="tab-content active bg-gray-800 p-6 rounded shadow-lg">
+            <h2 class="text-xl mb-4 font-semibold border-b border-gray-600 pb-2">Entrada Maestra del Proyecto</h2>
+            <p class="text-sm text-gray-400 mb-4">Ingrese aquí todos los parámetros físicos del levantamiento. Esta información será inyectada permanentemente en la Caja Negra.</p>
+            <form id="form-tab1" onsubmit="submitForm(event, '/API/tab1_homogenizar', 'console1', 2)">
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm mb-1 text-blue-300 font-bold">Enlace Drive - Base Pivote (.obs):</label>
+                        <input type="text" name="url_base" required placeholder="https://drive.google.com/file/d/..." class="w-full bg-gray-700 p-2 rounded border border-blue-500 text-sm text-white focus:outline-none focus:border-blue-400">
+                    </div>
+                    <div>
+                        <label class="block text-sm mb-1 text-green-300 font-bold">Enlace Drive - Rover Calibración (.obs):</label>
+                        <input type="text" name="url_rover" required placeholder="https://drive.google.com/file/d/..." class="w-full bg-gray-700 p-2 rounded border border-green-500 text-sm text-white focus:outline-none focus:border-green-400">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4 border-t border-gray-700 pt-4">
+                    <div class="sm:col-span-3"><h3 class="text-purple-400 font-bold text-sm">COORDENADAS ABSOLUTAS BASE (ESTACIÓN FIJA)</h3></div>
+                    <div><label class="block text-xs">Norte (Y):</label><input type="number" step="any" name="utm_norte" required class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600"></div>
+                    <div><label class="block text-xs">Este (X):</label><input type="number" step="any" name="utm_este" required class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600"></div>
+                    <div><label class="block text-xs">Cota Elipsoidal (Z):</label><input type="number" step="any" name="utm_cota" required class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600"></div>
+                    <div><label class="block text-xs">Huso UTM:</label><input type="number" name="utm_huso" value="19" required class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600"></div>
+                    <div><label class="block text-xs">Hemisferio:</label>
+                        <select name="utm_hemisferio" class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600">
+                            <option value="N">Norte (N)</option>
+                            <option value="S">Sur (S)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4 border-t border-gray-700 pt-4">
+                    <div class="sm:col-span-3"><h3 class="text-green-400 font-bold text-sm">COORDENADAS VERDADERAS ROVER (PUNTO DE CONTROL)</h3></div>
+                    <div><label class="block text-xs">Norte Rover (Y):</label><input type="number" step="any" name="utm_norte_r" required class="w-full bg-gray-700 p-2 text-sm rounded border border-green-500"></div>
+                    <div><label class="block text-xs">Este Rover (X):</label><input type="number" step="any" name="utm_este_r" required class="w-full bg-gray-700 p-2 text-sm rounded border border-green-500"></div>
+                    <div><label class="block text-xs">Cota Rover (Z):</label><input type="number" step="any" name="utm_cota_r" required class="w-full bg-gray-700 p-2 text-sm rounded border border-green-500"></div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4 border-t border-gray-700 pt-4 pb-2">
+                    <div class="sm:col-span-2"><h3 class="text-yellow-400 font-bold text-sm">ALTURAS DE ANTENA (METROS)</h3></div>
+                    <div><label class="block text-xs">Altura Antena Base (m):</label><input type="number" step="any" name="altura_base" value="0.000" class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600"></div>
+                    <div><label class="block text-xs">Altura Antena Rover (m):</label><input type="number" step="any" name="altura_rover" value="0.000" class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600"></div>
+                </div>
+
+                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded font-bold transition text-lg shadow-lg">Inyectar Datos, Descargar y Sincronizar</button>
+            </form>
+            <div id="console1" class="console p-4 mt-4 h-64 overflow-y-auto border border-gray-700 rounded"></div>
+            <button id="btn-pdf-tab1" onclick="descargarTextoPDF('console1', 'Informe_Sincronizacion')" class="hidden mt-4 bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded w-full shadow-lg">Descargar Informe de Épocas PDF</button>
+        </section>
+
+        <section id="tab2" class="tab-content bg-gray-800 p-6 rounded shadow-lg">
+            <h2 class="text-xl mb-4 font-semibold border-b border-gray-600 pb-2">Inyección de Órbitas Precisas (SP3)</h2>
+            <p class="text-sm text-gray-400 mb-4">Para evadir los bloqueos de Payload de Vercel, carga manualmente el archivo .SP3 (descomprimido). El servidor descargará el archivo .NAV de respaldo (11+ MB) de forma automática en segundo plano.</p>
+            <form id="form-tab2" onsubmit="submitForm(event, '/API/tab2_efemerides', 'console2', 3)">
+                <div class="grid grid-cols-1 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm mb-1 font-bold text-purple-400">Órbitas Precisas (.sp3) [REQUERIDO]:</label>
+                        <input type="file" name="file_sp3" required class="w-full bg-gray-700 p-2 rounded border border-purple-500">
+                        <p class="text-xs text-purple-300 mt-1">Sube el archivo descomprimido (.sp3) extraído con la app IGS Downloader.</p>
+                    </div>
+                </div>
+                <button type="submit" class="w-full bg-purple-600 hover:bg-purple-500 py-2 rounded font-bold transition">Cargar SP3 y Autocompletar Efemérides NAV</button>
+            </form>
+            <div id="console2" class="console p-4 mt-4 h-48 overflow-y-auto border border-gray-700 rounded"></div>
+            <button id="btn-pdf-tab2" onclick="descargarTextoPDF('console2', 'Informe_Efemerides')" class="hidden mt-4 bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded w-full shadow-lg">Descargar PDF de Efemérides</button>
+        </section>
+
+        <section id="tab3" class="tab-content bg-gray-800 p-6 rounded shadow-lg">
+            <h2 class="text-xl mb-4 font-semibold border-b border-gray-600 pb-2">Calibración Autónoma EKF (Caja Negra)</h2>
+            <p class="text-sm text-gray-400 mb-4">El motor optimizará de manera autónoma los filtros estadísticos utilizando los datos inyectados en la Pestaña 1. <span class="text-red-400 font-bold">Solo lectura. Modificación bloqueada por sistema.</span></p>
+            
+            <form id="form-tab3" onsubmit="submitForm(event, '/API/tab3_calibrar', 'console3', 4)">
+                
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                    <div class="sm:col-span-2"><h3 class="text-red-400 font-bold text-sm">PUNTOS DE ARRANQUE (DEFAULT SYSTEM)</h3></div>
+                    <div><label class="block text-xs text-gray-500">Límite Horizontal Teórico Inicial (m):</label><input type="number" step="any" name="err_hor_max" value="1.50" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                    <div><label class="block text-xs text-gray-500">Límite Vertical Teórico Inicial (m):</label><input type="number" step="any" name="err_ver_max" value="2.00" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4 border-t border-gray-700 pt-4">
+                    <div class="sm:col-span-3"><h3 class="text-blue-400 font-bold text-sm">Filtros Estadísticos (Centro Malla Monte Carlo)</h3></div>
+                    <div><label class="block text-xs text-gray-500">Máscara Elevación Base (°):</label><input type="number" step="any" name="param_mask" value="5.78" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                    <div><label class="block text-xs text-gray-500">Filtro Sigma Plan (cp):</label><input type="number" step="any" name="param_cp" value="2.50" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                    <div><label class="block text-xs text-gray-500">Filtro Sigma Alt (ca):</label><input type="number" step="any" name="param_ca" value="3.00" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4 border-t border-gray-700 pt-4">
+                    <div class="sm:col-span-3"><h3 class="text-orange-400 font-bold text-sm">Configuración Sistémica Inyectada</h3></div>
+                    <div><label class="block text-xs text-gray-500">Tolerancia Sync (sec):</label><input type="number" step="any" name="param_max_gap" value="0.50" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                    <div><label class="block text-xs text-gray-500">Máscara SNR Inicial (dBHz):</label><input type="number" step="any" name="param_snr" value="18.50" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                    <div>
+                        <label class="block text-xs text-purple-400 font-bold">Iteraciones Sugeridas (Auto):</label>
+                        <input type="number" step="1" id="param_iter" name="param_iter" value="4" class="w-full bg-gray-900 text-purple-400 font-bold p-1 text-sm rounded border border-purple-900 cursor-not-allowed shadow-[0_0_10px_rgba(168,85,247,0.2)]" readonly>
+                    </div>
+                </div>
+
+                <button type="submit" class="w-full bg-purple-600 hover:bg-purple-500 py-3 rounded font-bold transition text-lg mt-2 shadow-lg">Ejecutar Calibración Autónoma (Box Mode)</button>
+            </form>
+            <div id="console3" class="console p-4 mt-4 h-64 overflow-y-auto border border-gray-700 rounded"></div>
+            <button id="btn-pdf-tab3" onclick="descargarTextoPDF('console3', 'Informe_Calibracion_RMSE')" class="hidden mt-4 bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded w-full shadow-lg">Descargar Informe de Calibración PDF</button>
+        </section>
+
+        <section id="tab4" class="tab-content bg-gray-800 p-6 rounded shadow-lg">
+            <h2 class="text-xl mb-4 font-semibold border-b border-gray-600 pb-2">Ajuste de Red DGPS Diferencial (Cálculo Rover Desconocido)</h2>
+            <p class="text-sm text-gray-400 mb-4">El motor leerá automáticamente las coordenadas y parámetros óptimos fijados por la Caja Negra. Introduzca únicamente el enlace del Rover Desconocido.</p>
+            
+            <form id="form-tab4" onsubmit="submitForm(event, '/API/tab4_procesar', 'console4', null)">
+                <div class="grid grid-cols-1 gap-4 mb-4">
+                    <div>
+                        <h3 class="text-blue-400 font-bold text-sm mb-2">NUEVO ARCHIVO ROVER (PUNTO DESCONOCIDO)</h3>
+                        <label class="block text-xs text-blue-300 font-bold">Enlace Drive - RINEX Rover (.obs):</label>
+                        <input type="text" name="url_rover_nuevo" required placeholder="https://drive.google.com/file/d/..." class="w-full bg-gray-700 p-3 rounded border border-blue-500 text-white focus:outline-none focus:border-blue-400 shadow-inner">
+                    </div>
+                </div>
+
+                <div class="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-4 mt-4 border-t border-gray-700 pt-4">
+                    <button type="submit" class="w-full bg-green-600 hover:bg-green-500 py-3 rounded font-bold transition text-lg shadow-lg">Procesar Punto Desconocido</button>
+                    <button type="button" onclick="reiniciarProceso()" class="w-full bg-red-700 hover:bg-red-600 py-3 rounded font-bold transition text-lg shadow-lg border border-red-500">INICIAR DE NUEVO (RESET)</button>
+                </div>
+            </form>
+            
+            <div id="console4" class="console p-4 mt-4 h-96 overflow-y-auto border border-gray-700 rounded"></div>
+            <button id="btn-pdf-tab4" onclick="descargarTextoPDF('console4', 'Informe_Geodesico_DGPS')" class="hidden mt-4 bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded w-full shadow-lg">Descargar PDF de Resultados</button>
+        </section>
+    </div>
+
+    <script>
+        // --- CONFIGURACIÓN E INICIALIZACIÓN DE FIREBASE ---
+        const firebaseConfig = {
+          apiKey: "AIzaSyBAASJamPDpSKU6JZx88oLNQprgwkk3DZs",
+          authDomain: "gpsj-6790c.firebaseapp.com",
+          projectId: "gpsj-6790c",
+          storageBucket: "gpsj-6790c.firebasestorage.app",
+          messagingSenderId: "558545141519",
+          appId: "1:558545141519:web:d21e7360d54db4d84d887a"
+        };
+
+        firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+
+        let localToken = localStorage.getItem('gnssjp_token');
+        if (!localToken) {
+            localToken = Date.now().toString() + Math.random().toString(36).substring(2);
+            localStorage.setItem('gnssjp_token', localToken);
+        }
+
+        let heartbeatTimer = null;
+
+        async function startSessionHeartbeat(user) {
+            const beat = async () => {
+                try {
+                    await user.reload(); 
+                    const currentData = user.displayName;
+                    if (currentData) {
+                        const parts = currentData.split("_");
+                        if (parts.length === 2 && parts[1] !== localToken) {
+                            stopSessionHeartbeat();
+                            alert("SESIÓN FINALIZADA: Se ha iniciado sesión en otro dispositivo. Por seguridad, esta ventana se cerrará.");
+                            window.location.reload(); 
+                            return;
+                        }
+                    }
+                    const payload = Date.now() + "_" + localToken;
+                    await user.updateProfile({ displayName: payload });
+                } catch (e) {}
+            };
+            await beat();
+            heartbeatTimer = setInterval(beat, 45000);
+        }
+
+        function stopSessionHeartbeat() {
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
+        }
+
+        auth.onAuthStateChanged(async (user) => {
+            const loginContainer = document.getElementById('login-container');
+            const appContainer = document.getElementById('app-container');
+            const errorDiv = document.getElementById('login-error');
+            
+            if (user) {
+                const currentData = user.displayName; 
+                let isLockedOut = false;
+
+                if (currentData) {
+                    const parts = currentData.split("_");
+                    if (parts.length === 2) {
+                        const lastBeat = parseInt(parts[0]);
+                        const activeToken = parts[1];
+                        const timeSinceLastBeat = Date.now() - lastBeat;
+
+                        if (activeToken !== localToken && timeSinceLastBeat < 90000) {
+                            isLockedOut = true;
+                        }
+                    }
+                }
+
+                if (isLockedOut) {
+                    errorDiv.innerText = "ACCESO DENEGADO: El usuario ya está activo en otro dispositivo al mismo tiempo.";
+                    errorDiv.classList.remove('hidden');
+                    await auth.signOut();
+                    return; 
+                }
+
+                startSessionHeartbeat(user);
+                loginContainer.classList.add('hidden');
+                appContainer.classList.remove('hidden');
+                errorDiv.innerText = "";
+                document.getElementById('login-form').reset();
+            } else {
+                stopSessionHeartbeat();
+                appContainer.classList.add('hidden');
+                loginContainer.classList.remove('hidden');
+            }
+        });
+
+        async function loginUsuario(e) {
+            e.preventDefault();
+            const email = document.getElementById('login-email').value;
+            const password = document.getElementById('login-password').value;
+            const errorDiv = document.getElementById('login-error');
+            errorDiv.classList.add('hidden');
+            try { await auth.signInWithEmailAndPassword(email, password); } 
+            catch (error) {
+                errorDiv.innerText = "Error: " + error.message;
+                errorDiv.classList.remove('hidden');
+            }
+        }
+
+        async function cerrarSesion() {
+            if (auth.currentUser) {
+                stopSessionHeartbeat();
+                try { await auth.currentUser.updateProfile({ displayName: "" }); } catch (error) {}
+            }
+            auth.signOut();
+        }
+
+        function switchTab(num) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.getElementById('tab' + num).classList.add('active');
+            
+            document.querySelectorAll('#tabs-nav button').forEach(el => {
+                el.classList.remove('bg-blue-600');
+                el.classList.add('bg-gray-700');
+            });
+            document.getElementById('btn-tab' + num).classList.remove('bg-gray-700');
+            document.getElementById('btn-tab' + num).classList.add('bg-blue-600');
+        }
+
+        function bloquearFormulario(tabNum) {
+            const form = document.getElementById('form-tab' + tabNum);
+            if (form) {
+                const elementos = form.querySelectorAll('input, select, button[type="submit"]');
+                elementos.forEach(el => {
+                    el.disabled = true;
+                    el.classList.add('opacity-50', 'cursor-not-allowed');
+                });
+            }
+        }
+
+        function desbloquearFormulario(tabNum) {
+            const form = document.getElementById('form-tab' + tabNum);
+            if (form) {
+                const elementos = form.querySelectorAll('input, select, button[type="submit"]');
+                elementos.forEach(el => {
+                    el.disabled = false;
+                    el.classList.remove('opacity-50', 'cursor-not-allowed');
+                });
+            }
+        }
+
+        function reiniciarProceso() {
+            if (!confirm("ALERTA: ¿Desea iniciar un nuevo proyecto? Se borrará todo el estado actual.")) return;
+            for (let i = 1; i <= 4; i++) {
+                const form = document.getElementById('form-tab' + i);
+                if (form) form.reset();
+                const consola = document.getElementById('console' + i);
+                if (consola) consola.textContent = '';
+                const btnPdf = document.getElementById('btn-pdf-tab' + i);
+                if (btnPdf) btnPdf.classList.add('hidden');
+                
+                desbloquearFormulario(i);
+                if (i > 1) document.getElementById('btn-tab' + i).classList.add('disabled-tab');
+            }
+            switchTab(1);
+        }
+
+        // --- SISTEMA DE AUDIO (AVISO BEEP) ---
+        function playSuccessBeep() {
+            try {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContext) return;
+                const ctx = new AudioContext();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(880, ctx.currentTime); // Nota A5
+                
+                gain.gain.setValueAtTime(0.1, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 0.6);
+                
+                osc.start(ctx.currentTime);
+                osc.stop(ctx.currentTime + 0.6);
+            } catch(e) { console.error("Audio bloqueado por navegador", e); }
+        }
+
+        // --- MOTOR CENTRAL ---
+        async function submitForm(e, url, consoleId, nextTab) {
+            e.preventDefault();
+            const form = e.target;
+            const data = new FormData(form);
+            const display = document.getElementById(consoleId);
+            display.textContent = "> Iniciando comunicación con el motor GNSSJP...\n";
+            
+            const pdfButtons = ['btn-pdf-tab1', 'btn-pdf-tab2', 'btn-pdf-tab3', 'btn-pdf-tab4'];
+            pdfButtons.forEach(id => {
+                const btn = document.getElementById(id);
+                if(btn && consoleId === id.replace('btn-pdf-', 'console')) btn.classList.add('hidden');
+            });
+
+            // Lógica UI Modal Pestaña 3
+            const modal = document.getElementById('progress-modal');
+            const progressBar = document.getElementById('progress-bar');
+            const progressText = document.getElementById('progress-text');
+            const progressStatus = document.getElementById('progress-status');
+            
+            if (url === '/API/tab3_calibrar') {
+                modal.classList.remove('hidden');
+                progressBar.style.width = '0%';
+                progressText.innerText = '0%';
+                progressStatus.innerText = 'Configurando mallas matriciales EKF...';
+            }
+
+            let fullOutput = "";
+
+            try {
+                const response = await fetch(url, { method: 'POST', body: data });
+                if (!response.body) throw new Error("No se recibió respuesta del servidor.");
+                
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    
+                    let text = decoder.decode(value, { stream: true });
+                    fullOutput += text;
+                    
+                    // --- EXTRACCIÓN AUTOMÁTICA DE ITERACIONES (Pestaña 1 -> Pestaña 3) ---
+                    if (url === '/API/tab1_homogenizar') {
+                        const iterMatch = text.match(/Iteraciones EKF Sugeridas\s*:\s*(\d+)/);
+                        if (iterMatch && iterMatch[1]) {
+                            const iterField = document.getElementById('param_iter');
+                            if (iterField) iterField.value = iterMatch[1];
+                        }
+                    }
+
+                    // --- EXTRACCIÓN DE PROGRESO (Modal Pestaña 3) ---
+                    if (url === '/API/tab3_calibrar' && text.includes('Zoom')) {
+                        const zoomMatches = text.match(/Zoom\s+(\d+)\/(\d+)/g);
+                        if (zoomMatches) {
+                            const lastMatch = zoomMatches[zoomMatches.length - 1];
+                            const parts = lastMatch.match(/Zoom\s+(\d+)\/(\d+)/);
+                            if (parts) {
+                                const current = parseInt(parts[1]);
+                                const total = parseInt(parts[2]);
+                                const pct = Math.min(100, Math.round(((current - 1) / total) * 100) + 15); // Suavizado visual
+                                progressBar.style.width = pct + '%';
+                                progressText.innerText = pct + '%';
+                                progressStatus.innerText = `Refinando nivel de profundidad ${current} de ${total}...`;
+                            }
+                        }
+                    }
+
+                    // Cierre del modal en caso de Error crítico
+                    if (url === '/API/tab3_calibrar' && text.includes('[ERROR')) {
+                        modal.classList.add('hidden');
+                    }
+                    
+                    display.textContent = fullOutput;
+                    display.scrollTop = display.scrollHeight;
+                }
+
+                if (fullOutput.includes('[SUCCESS]')) {
+                    
+                    if (url === '/API/tab3_calibrar') {
+                        progressBar.style.width = '100%';
+                        progressText.innerText = '100%';
+                        progressStatus.innerText = '¡Filtros Calibrados Exitosamente!';
+                        
+                        // Esperar medio segundo, reproducir beep y ocultar modal
+                        setTimeout(() => {
+                            modal.classList.add('hidden');
+                            playSuccessBeep();
+                        }, 600);
+                    }
+
+                    if (nextTab) {
+                        document.getElementById('btn-tab' + nextTab).classList.remove('disabled-tab');
+                        bloquearFormulario(nextTab - 1);
+                        switchTab(nextTab);
+                    }
+                    
+                    if (consoleId === 'console1') document.getElementById('btn-pdf-tab1').classList.remove('hidden');
+                    if (consoleId === 'console2') document.getElementById('btn-pdf-tab2').classList.remove('hidden');
+                    if (consoleId === 'console3') document.getElementById('btn-pdf-tab3').classList.remove('hidden');
+                    if (consoleId === 'console4') document.getElementById('btn-pdf-tab4').classList.remove('hidden');
+                }
+
+            } catch (err) {
+                display.textContent += "\n[ERROR] " + err.message;
+                if (url === '/API/tab3_calibrar') modal.classList.add('hidden');
+            }
+        }
+
+        function descargarTextoPDF(consoleId, nombreBase) {
+            try {
+                const display = document.getElementById(consoleId);
+                if (!display) { alert("Consola no encontrada."); return; }
+                const { jsPDF } = window.jspdf;
+                
+                let lineasCrudas = display.textContent.split('\n');
+                let reporteLimpio = lineasCrudas.filter(l => 
+                    !l.includes('[SUCCESS]') && !l.includes('[PROGRESO]') && l.trim() !== ''
+                ).map(l => l.startsWith('>') ? l.substring(1).trim() : l);
+
+                if (reporteLimpio.length === 0) { alert("No hay datos válidos."); return; }
+
+                const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'letter' });
+                doc.setFont("courier", "normal");
+                doc.setFontSize(10);
+                
+                let pos_y = 50; const pos_x = 40; const maxLineWidth = 530; 
+                
+                for(let i=0; i < reporteLimpio.length; i++) {
+                    let lineasDivididas = doc.splitTextToSize(reporteLimpio[i], maxLineWidth);
+                    for(let j=0; j < lineasDivididas.length; j++) {
+                        if (pos_y > 740) { doc.addPage(); pos_y = 50; }
+                        doc.text(lineasDivididas[j], pos_x, pos_y);
+                        pos_y += 14; 
+                    }
+                }
+                doc.save(nombreBase + '_' + new Date().getTime() + '.pdf');
+            } catch (error) { alert("Ocurrió un error al generar el PDF."); }
+        }
+    </script>
+</body>
+</html>
